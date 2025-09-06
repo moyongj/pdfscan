@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8">
+  <title>PDF 扫描件效果模拟</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      background: #e5e5e5;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 20px;
+    }
+    canvas {
+      margin: 20px 0;
+      box-shadow: 0 0 15px rgba(0,0,0,0.5);
+      background: white;
+    }
+    #controls {
+      margin: 10px;
+    }
+    button {
+      margin: 5px;
+      padding: 8px 12px;
+      border: none;
+      border-radius: 5px;
+      cursor: pointer;
+      background: #4caf50;
+      color: white;
+    }
+    button:hover {
+      background: #45a049;
+    }
+    #pageContainer {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+  </style>
+</head>
+<body>
+  <h2>PDF 仿扫描件效果</h2>
+  <div id="controls">
+    <input type="file" id="fileInput" accept="application/pdf">
+    <button id="downloadBtn">下载仿扫描 PDF</button>
+  </div>
+  <div id="pageContainer"></div>
+
+  <!-- 引入 PDF.js -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js"></script>
+  <!-- 引入 jsPDF -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+
+  <script>
+    const fileInput = document.getElementById('fileInput');
+    const pageContainer = document.getElementById('pageContainer');
+    const downloadBtn = document.getElementById('downloadBtn');
+
+    let renderedImages = [];
+
+    // 添加扫描噪点纹理
+    function addNoise(ctx, width, height) {
+      const imageData = ctx.getImageData(0, 0, width, height);
+      const pixels = imageData.data;
+      for (let i = 0; i < pixels.length; i += 4) {
+        const noise = (Math.random() - 0.5) * 5;
+        pixels[i] += noise;     // R
+        pixels[i+1] += noise;   // G
+        pixels[i+2] += noise;   // B
+      }
+      ctx.putImageData(imageData, 0, 0);
+    }
+
+    // 添加扫描阴影（边缘渐暗）
+    function addShadow(ctx, width, height) {
+      const gradient = ctx.createRadialGradient(width/2, height/2, Math.min(width, height)/2.2, width/2, height/2, Math.max(width, height)/1.2);
+      gradient.addColorStop(0, "rgba(0,0,0,0)");
+      gradient.addColorStop(1, "rgba(0,0,0,0.1)");
+      ctx.fillStyle = gradient;
+      ctx.fillRect(0, 0, width, height);
+    }
+
+    // 渲染单个页面到 Canvas
+    async function renderPage(pdf, pageNum) {
+      const page = await pdf.getPage(pageNum);
+      const viewport = page.getViewport({ scale: 3.0 });
+
+      const canvas = document.createElement('canvas');
+      const ctx = canvas.getContext('2d');
+      canvas.width = viewport.width;
+      canvas.height = viewport.height;
+
+      // 设置白色背景，避免旋转后出现黑色区域
+      ctx.fillStyle = 'white';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+      // 随机旋转角度（仿扫描倾斜）
+      const angle = (Math.random() - 0.3) * 0.03; // -0.05 ~ 0.05 弧度
+      ctx.save();
+      ctx.translate(canvas.width/2, canvas.height/2);
+      ctx.rotate(angle);
+      ctx.translate(-canvas.width/2, -canvas.height/2);
+
+      await page.render({
+        canvasContext: ctx,
+        viewport: viewport
+      }).promise;
+
+      ctx.restore();
+
+      // 添加噪点与阴影
+      addNoise(ctx, canvas.width, canvas.height);
+      addShadow(ctx, canvas.width, canvas.height);
+
+      return canvas.toDataURL("image/jpeg", 0.95);
+    }
+
+    // 渲染 PDF 到 Canvas
+    async function renderPDF(file) {
+      const fileReader = new FileReader();
+      fileReader.onload = async function() {
+        const typedarray = new Uint8Array(this.result);
+        const pdf = await pdfjsLib.getDocument(typedarray).promise;
+        
+        // 清空之前的渲染
+        pageContainer.innerHTML = '';
+        renderedImages = [];
+
+        // 渲染所有页面
+        for (let i = 1; i <= pdf.numPages; i++) {
+          const imageData = await renderPage(pdf, i);
+          renderedImages.push(imageData);
+          
+          // 显示页面预览
+          const canvas = document.createElement('canvas');
+          const ctx = canvas.getContext('2d');
+          const img = new Image();
+          img.onload = function() {
+            canvas.width = img.width;
+            canvas.height = img.height;
+            ctx.drawImage(img, 0, 0);
+            pageContainer.appendChild(canvas);
+          };
+          img.src = imageData;
+        }
+      };
+      fileReader.readAsArrayBuffer(file);
+    }
+
+    // 下载仿扫描 PDF
+    downloadBtn.addEventListener('click', () => {
+      if (renderedImages.length === 0) {
+        alert("请先选择并加载 PDF 文件！");
+        return;
+      }
+      
+      const { jsPDF } = window.jspdf;
+      
+      // 创建PDF文档，使用第一页的尺寸作为默认尺寸
+      const firstImg = new Image();
+      firstImg.onload = function() {
+        const pdf = new jsPDF({
+          orientation: firstImg.width > firstImg.height ? 'landscape' : 'portrait',
+          unit: 'px',
+          format: [firstImg.width, firstImg.height]
+        });
+        
+        // 添加第一页
+        pdf.addImage(renderedImages[0], 'JPEG', 0, 0, firstImg.width, firstImg.height);
+        
+        // 添加后续页面
+        let processedPages = 1; // 已处理的页面数
+        
+        for (let i = 1; i < renderedImages.length; i++) {
+          const img = new Image();
+          img.onload = (function(index) {
+            return function() {
+              pdf.addPage([this.width, this.height]);
+              pdf.addImage(renderedImages[index], 'JPEG', 0, 0, this.width, this.height);
+              processedPages++;
+              
+              // 所有页面处理完成时保存文件
+              if (processedPages === renderedImages.length) {
+                // 使用上传文件的名称作为基础，添加"签名（扫描版）"后缀
+                const originalFileName = fileInput.files[0].name;
+                const fileNameWithoutExtension = originalFileName.replace(/\.[^/.]+$/, "");
+                const newFileName = fileNameWithoutExtension + "签名（扫描版）.pdf";
+                pdf.save(newFileName);
+              }
+            };
+          })(i);
+          img.src = renderedImages[i];
+        }
+        
+        // 如果只有一页，直接保存
+        if (renderedImages.length === 1) {
+          // 使用上传文件的名称作为基础，添加"签名（扫描版）"后缀
+          const originalFileName = fileInput.files[0].name;
+          const fileNameWithoutExtension = originalFileName.replace(/\.[^/.]+$/, "");
+          const newFileName = fileNameWithoutExtension + "签名（扫描版）.pdf";
+          pdf.save(newFileName);
+        }
+      };
+      firstImg.src = renderedImages[0];
+    });
+
+    fileInput.addEventListener('change', (e) => {
+      const file = e.target.files[0];
+      if (file) renderPDF(file);
+    });
+  </script>
+</body>
+</html>
